@@ -2,6 +2,7 @@ import numpy as np
 import re
 import oceanwaves
 from datetime import datetime
+import pytz
 
 WD_TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
@@ -15,7 +16,7 @@ class WaveDroidReader:
 
     def reset(self):
         
-        self.stationary = True
+        self.stationary = False
         self.directional = False
 
         self.version = None
@@ -23,11 +24,10 @@ class WaveDroidReader:
         self.comments = []
 
         self.time = []
-        #self.locations = []
+        self.energy_units = None
         self.frequencies = []
         self.directions = []
-        #self.specs = OrderedDict()
-        #self.quantities = []
+        self.energy = []
         
 
     def __call__(self, fpath):
@@ -47,41 +47,34 @@ class WaveDroidReader:
         
         self.parse_data()
         
+        self.make_aware() # Add timezone to self.time
+        
         if any(self.frequencies):
             self.compute_spectrum()
+            self.energy_units = 'm^2/Hz'
+        else:
+            self.energy = self.Hm0[:,None,None,None]
+            self.energy_units = 'm'        
         
         
     def to_oceanwaves(self):
-
-        if self.specs.has_key('VaDens'):
-            energy_units = self.specs['VaDens']['units']
-        else:
-            energy_units = None
-
-        kwargs = dict(location=self.locations,
-                      location_units='m' if self.crs is None else 'deg',
+        
+        loc = [(self.longitude,self.latitude)]
+        kwargs = dict(location=loc,
+                      location_units='deg',
                       frequency=self.frequencies,
                       frequency_units='Hz',
-                      frequency_convention=self.frequency_convention,
-                      energy_units=energy_units,
-                      attrs=dict(comments=self.comments),
-                      crs=self.crs)
+                      frequency_convention='absolute',
+                      energy=self.energy[:,None,:,:],
+                      energy_units=self.energy_units,
+                      time=self.time,
+                      time_units='s',
+                      attrs=dict(comments=self.comments))
 
         if self.directional:
             kwargs.update(dict(direction=self.directions,
                                direction_units='deg',
-                               direction_convention=self.direction_convention,
-                               energy=self.quantities))
-            if not self.stationary:
-                kwargs.update(dict(time=self.time,
-                                   time_units='s'))
-        else:
-            if not self.stationary:
-                kwargs.update(dict(time=self.time,
-                                   time_units='s',
-                                   energy=[[q2[:,0] for q2 in q1] for q1 in self.quantities]))
-            else:
-                kwargs.update(dict(energy=[q[:,0] for q in self.quantities]))
+                               direction_convention='nautical'))
 
         return oceanwaves.OceanWaves(**kwargs)
         
@@ -126,6 +119,8 @@ class WaveDroidReader:
             self.m1 = []
             self.m2 = []
             self.n2 = []
+            
+            self.directional = True
         
         while lines:
             line = lines.pop(0)
@@ -145,7 +140,12 @@ class WaveDroidReader:
                 self.m1.append(np.asarray(vals[9].split(','),dtype=float))
                 self.m2.append(np.asarray(vals[10].split(','),dtype=float))
                 self.n2.append(np.asarray(vals[11].split(','),dtype=float))                
-            
+    
+    def make_aware(self):
+        
+        tz = pytz.timezone(self.timezone)
+        self.time = map(tz.localize,self.time)
+
     
     def parse_version(self):
         line = self._currentline()
@@ -160,12 +160,16 @@ class WaveDroidReader:
         m = re.search('(?<=ID\s=\s)WD[0-9]*',line)
         self.id = m.group()
         
+        self.comments.append('WaveDroid ID = %s' %(self.id))
+        
         
     def parse_location(self):
         line = self._currentline()
         
         m = re.search('(?<=location\s=\s).*',line)
         self.location = m.group()
+
+        self.comments.append('WaveDroid location = %s' %(self.location))        
         
         
     def parse_lat(self):
@@ -187,14 +191,16 @@ class WaveDroidReader:
         
         m = re.search('(?<=magdec\s=\s)[0-9\.-]*',line)
         self.magdec = float(m.group())
-
+        
 
     def parse_tz(self):
         line = self._currentline()
         
         m = re.search('(?<=timezone\s=\s)[A-Za-z0-9/_]*',line)
         self.timezone = m.group()
-
+        
+        self.comments.append('Timezone = %s' %(self.timezone))
+        
 
     def parse_freq(self):
         line = self._currentline()
@@ -211,13 +217,17 @@ class WaveDroidReader:
         
         rad = np.linspace(-np.pi,np.pi-2*np.pi/ndir,ndir)
         
-        for i,(p,t,m,mm,nn) in enumerate(zip(self.Puu,self.th0,self.m1,self.m2,self.n2)):
+        self.th0_cor = map(self.add_magdec,self.th0)
+        for i,(p,t,m,mm,nn) in enumerate(zip(self.Puu,self.th0_cor,self.m1,self.m2,self.n2)):
             for j,r in enumerate(rad):
                 spec[i,:,j] = 1/np.pi*(.5 + m*np.cos(r-t) + mm*np.cos(2*(r-t)) + nn*np.sin(2*(r-t)))*p
         
-        self.spectrum = np.roll(spec,ndir/2,axis=2)
+        self.energy = np.roll(spec,ndir/2,axis=2) # Shift from -pi->pi to 0->2pi
         
         self.directions = np.linspace(0.,360.-360./ndir,ndir)
+
+    def add_magdec(self,x):
+        return x + self.magdec
 
 
     def _currentline(self):
