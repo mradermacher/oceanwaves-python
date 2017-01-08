@@ -29,6 +29,8 @@ class WaveDroidReader:
         self.directions = []
         self.energy = []
         
+        self.crs = 'epsg:4326'
+        
 
     def __call__(self, fpath):
 
@@ -62,6 +64,7 @@ class WaveDroidReader:
         loc = [(self.longitude,self.latitude)]
         kwargs = dict(location=loc,
                       location_units='deg',
+                      crs = self.crs,
                       frequency=self.frequencies,
                       frequency_units='Hz',
                       frequency_convention='absolute',
@@ -226,8 +229,11 @@ class WaveDroidReader:
         
         self.directions = np.linspace(0.,360.-360./ndir,ndir)
 
-    def add_magdec(self,x):
-        return x + self.magdec
+    def add_magdec(self,x,rad=True):
+        if rad:
+            return x + self.magdec*np.pi/180.
+        else:
+            return x + self.magdec
 
 
     def _currentline(self):
